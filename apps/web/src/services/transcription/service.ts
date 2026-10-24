@@ -4,32 +4,36 @@ import type {
 	TranscriptionProgress,
 	TranscriptionModelId,
 } from "@/transcription/types";
+import { TRANSCRIPTION_MODELS } from "@/transcription/models";
 import {
-	DEFAULT_TRANSCRIPTION_MODEL,
-	TRANSCRIPTION_MODELS,
-} from "@/transcription/models";
+	getHardwareProfile,
+	type TranscriptionHardwareId,
+} from "@/transcription/hardware";
 import type { WorkerMessage, WorkerResponse } from "./worker";
 
 type ProgressCallback = (progress: TranscriptionProgress) => void;
 
 class TranscriptionService {
 	private worker: Worker | null = null;
-	private currentModelId: TranscriptionModelId | null = null;
+	private currentConfigKey: string | null = null;
 	private isInitialized = false;
 	private isInitializing = false;
 
 	async transcribe({
 		audioData,
 		language = "auto",
-		modelId = DEFAULT_TRANSCRIPTION_MODEL,
+		hardware = "cpu",
+		modelId,
 		onProgress,
 	}: {
 		audioData: Float32Array;
 		language?: TranscriptionLanguage;
+		hardware?: TranscriptionHardwareId;
+		/** Overrides the hardware tier's default Whisper size. */
 		modelId?: TranscriptionModelId;
 		onProgress?: ProgressCallback;
 	}): Promise<TranscriptionResult> {
-		await this.ensureWorker({ modelId, onProgress });
+		await this.ensureWorker({ hardware, modelId, onProgress });
 
 		return new Promise((resolve, reject) => {
 			if (!this.worker) {
@@ -85,13 +89,18 @@ class TranscriptionService {
 	}
 
 	private async ensureWorker({
-		modelId,
+		hardware,
+		modelId: requestedModelId,
 		onProgress,
 	}: {
-		modelId: TranscriptionModelId;
+		hardware: TranscriptionHardwareId;
+		modelId?: TranscriptionModelId;
 		onProgress?: ProgressCallback;
 	}): Promise<void> {
-		const needsNewModel = this.currentModelId !== modelId;
+		const profile = getHardwareProfile({ id: hardware });
+		const modelId = requestedModelId ?? profile.modelId;
+		const configKey = `${hardware}:${modelId}`;
+		const needsNewModel = this.currentConfigKey !== configKey;
 
 		if (this.worker && this.isInitialized && !needsNewModel) {
 			return;
@@ -137,7 +146,7 @@ class TranscriptionService {
 						this.worker?.removeEventListener("message", handleMessage);
 						this.isInitialized = true;
 						this.isInitializing = false;
-						this.currentModelId = modelId;
+						this.currentConfigKey = configKey;
 						resolve();
 						break;
 
@@ -155,6 +164,8 @@ class TranscriptionService {
 			this.worker.postMessage({
 				type: "init",
 				modelId: model.huggingFaceId,
+				device: profile.device,
+				dtype: profile.dtype,
 			} satisfies WorkerMessage);
 		});
 	}
@@ -179,7 +190,7 @@ class TranscriptionService {
 		this.worker = null;
 		this.isInitialized = false;
 		this.isInitializing = false;
-		this.currentModelId = null;
+		this.currentConfigKey = null;
 	}
 }
 

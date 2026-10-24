@@ -14,6 +14,7 @@ import type {
 	TextFontStyle,
 	TextFontWeight,
 } from "@/text/primitives";
+import { splitTextUnits } from "@/transcription/diarization/text-units";
 import type { SubtitleCue, SubtitleStyleOverrides } from "./types";
 
 const SUBTITLE_MAX_WIDTH_RATIO = 0.8;
@@ -62,12 +63,15 @@ function wrapSubtitleText({
 			continue;
 		}
 
-		const words = trimmedParagraph.split(/\s+/);
+		// CJK has no spaces between words, so it wraps between characters.
+		const { units: words, joiner } = splitTextUnits({
+			text: trimmedParagraph,
+		});
 		let currentLine = words[0] ?? "";
 		const lines: string[] = [];
 
 		for (let i = 1; i < words.length; i++) {
-			const nextLine = `${currentLine} ${words[i]}`;
+			const nextLine = `${currentLine}${joiner}${words[i]}`;
 			if (measureLineWidth({ ctx, text: nextLine }) <= maxWidth) {
 				currentLine = nextLine;
 				continue;
