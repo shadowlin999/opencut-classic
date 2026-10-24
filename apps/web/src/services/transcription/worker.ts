@@ -5,12 +5,22 @@ import {
 } from "@huggingface/transformers";
 import type { TranscriptionSegment } from "@/transcription/types";
 import {
+	getWebGpu,
+	type TranscriptionDevice,
+	type WhisperDtypeConfig,
+} from "@/transcription/hardware";
+import {
 	DEFAULT_CHUNK_LENGTH_SECONDS,
 	DEFAULT_STRIDE_SECONDS,
 } from "@/transcription/audio";
 
 export type WorkerMessage =
-	| { type: "init"; modelId: string }
+	| {
+			type: "init";
+			modelId: string;
+			device: TranscriptionDevice;
+			dtype: WhisperDtypeConfig;
+	  }
 	| { type: "transcribe"; audio: Float32Array; language: string }
 	| { type: "cancel" };
 
@@ -37,7 +47,11 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
 
 	switch (message.type) {
 		case "init":
-			await handleInit({ modelId: message.modelId });
+			await handleInit({
+				modelId: message.modelId,
+				device: message.device,
+				dtype: message.dtype,
+			});
 			break;
 		case "transcribe":
 			await handleTranscribe({
@@ -52,14 +66,46 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
 	}
 };
 
-async function handleInit({ modelId }: { modelId: string }) {
+/**
+ * fp16 on WebGPU needs the shader-f16 feature. Without it, fp16 weights fall
+ * back to fp32 (encoder) or q4 (decoder) so the model still loads.
+ */
+async function resolveDtype({
+	device,
+	dtype,
+}: {
+	device: TranscriptionDevice;
+	dtype: WhisperDtypeConfig;
+}): Promise<WhisperDtypeConfig> {
+	if (device !== "webgpu") return dtype;
+	const adapter = await getWebGpu()
+		?.requestAdapter()
+		.catch(() => null);
+	if (adapter?.features.has("shader-f16")) return dtype;
+	return {
+		encoder_model:
+			dtype.encoder_model === "fp16" ? "fp32" : dtype.encoder_model,
+		decoder_model_merged:
+			dtype.decoder_model_merged === "fp16" ? "q4" : dtype.decoder_model_merged,
+	};
+}
+
+async function handleInit({
+	modelId,
+	device,
+	dtype,
+}: {
+	modelId: string;
+	device: TranscriptionDevice;
+	dtype: WhisperDtypeConfig;
+}) {
 	lastReportedProgress = -1;
 	fileBytes.clear();
 
 	try {
 		transcriber = (await pipeline("automatic-speech-recognition", modelId, {
-			dtype: "q4",
-			device: "auto",
+			dtype: await resolveDtype({ device, dtype }),
+			device,
 			progress_callback: (progressInfo: {
 				status?: string;
 				file?: string;

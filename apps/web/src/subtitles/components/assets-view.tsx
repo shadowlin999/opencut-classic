@@ -1,4 +1,6 @@
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { PanelView } from "@/components/editor/panels/assets/views/base-panel";
 import {
 	Select,
@@ -7,7 +9,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
-import { useReducer, useRef, useState } from "react";
+import { useMemo, useReducer, useRef, useState } from "react";
 import { extractTimelineAudio } from "@/media/mediabunny";
 import { useEditor } from "@/editor/use-editor";
 import { TRANSCRIPTION_DIAGNOSTICS_SCOPE } from "@/transcription/diagnostics";
@@ -19,9 +21,30 @@ import type {
 	TranscriptionProgress,
 } from "@/transcription/types";
 import { transcriptionService } from "@/services/transcription/service";
+import { diarizationService } from "@/services/transcription/diarization-service";
+import {
+	TRANSCRIPTION_HARDWARE_PROFILES,
+	detectHardwareProfileId,
+	type TranscriptionHardwareId,
+} from "@/transcription/hardware";
+import {
+	MAX_SPEAKERS,
+	assignSpeakersToSegments,
+	isCjkText,
+} from "@/transcription/diarization";
+import {
+	CJK_SPEAKER_LABEL,
+	DEFAULT_SPEAKER_LABEL,
+	buildSpeakerCaptionTracks,
+	findSpeakerTracks,
+} from "@/transcription/speaker-captions";
+import { renameSpeakerOnTrack } from "@/subtitles/rename-speaker";
 import { decodeAudioToFloat32 } from "@/media/audio";
 import { buildCaptionChunks } from "@/transcription/caption";
-import { insertCaptionChunksAsTextTrack } from "@/subtitles/insert";
+import {
+	insertCaptionChunksAsTextTrack,
+	insertSpeakerCaptionTracks,
+} from "@/subtitles/insert";
 import { parseSubtitleFile } from "@/subtitles/parse";
 import { Spinner } from "@/components/ui/spinner";
 import {
@@ -58,6 +81,13 @@ type ProcessingAction =
 	| { type: "succeed"; warnings: string[] }
 	| { type: "fail"; error: string };
 
+type HardwareChoice = TranscriptionHardwareId | "auto";
+
+const SPEAKER_COUNT_OPTIONS = Array.from(
+	{ length: MAX_SPEAKERS - 1 },
+	(_, index) => `${index + 2}`,
+);
+
 const IDLE_STATE: ProcessingState = {
 	status: "idle",
 	error: null,
@@ -83,15 +113,66 @@ function processingReducer(
 }
 /* eslint-enable opencut/prefer-object-params */
 
+function SpeakerNameField({
+	trackId,
+	name,
+}: {
+	trackId: string;
+	name: string;
+}) {
+	const editor = useEditor();
+	// Remounted (by key) when the name changes, so the draft starts fresh.
+	const [draft, setDraft] = useState(name);
+
+	const commit = () => {
+		const next = draft.trim();
+		if (!next || next === name) {
+			setDraft(name);
+			return;
+		}
+		renameSpeakerOnTrack({ editor, trackId, oldName: name, newName: next });
+	};
+
+	return (
+		<Input
+			value={draft}
+			aria-label={`Rename ${name}`}
+			onChange={(event) => setDraft(event.target.value)}
+			onBlur={commit}
+			onKeyDown={(event) => {
+				if (event.key === "Enter") event.currentTarget.blur();
+				if (event.key === "Escape") {
+					setDraft(name);
+					event.currentTarget.blur();
+				}
+			}}
+		/>
+	);
+}
+
 export function Captions() {
 	const [selectedLanguage, setSelectedLanguage] =
 		useState<TranscriptionLanguage>("auto");
+	const [selectedHardware, setSelectedHardware] =
+		useState<HardwareChoice>("auto");
+	const [identifySpeakers, setIdentifySpeakers] = useState(false);
+	const [speakerCount, setSpeakerCount] = useState("auto");
+	const [speakerLabel, setSpeakerLabel] = useState("");
 	const [processing, dispatch] = useReducer(processingReducer, IDLE_STATE);
 	const containerRef = useRef<HTMLDivElement>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const editor = useEditor();
 
 	const isProcessing = processing.status === "processing";
+
+	const activeScene = useEditor((e) => e.scenes.getActiveSceneOrNull());
+	const speakerTracks = useMemo(
+		() =>
+			activeScene
+				? findSpeakerTracks({ tracks: activeScene.tracks.overlay })
+				: [],
+		[activeScene],
+	);
 
 	const activeDiagnostics = useEditor((e) =>
 		e.diagnostics.getActive({ scope: TRANSCRIPTION_DIAGNOSTICS_SCOPE }),
@@ -104,7 +185,10 @@ export function Captions() {
 				step: `Loading model ${Math.round(progress.progress)}%`,
 			});
 		} else if (progress.status === "transcribing") {
-			dispatch({ type: "update_step", step: "Transcribing..." });
+			dispatch({
+				type: "update_step",
+				step: progress.message ?? "Transcribing...",
+			});
 		}
 	};
 
@@ -132,11 +216,54 @@ export function Captions() {
 				sampleRate: DEFAULT_TRANSCRIPTION_SAMPLE_RATE,
 			});
 
+			const hardware =
+				selectedHardware === "auto"
+					? await detectHardwareProfileId()
+					: selectedHardware;
 			const result = await transcriptionService.transcribe({
 				audioData: samples,
 				language: selectedLanguage === "auto" ? undefined : selectedLanguage,
+				hardware,
 				onProgress: handleProgress,
 			});
+
+			if (identifySpeakers) {
+				dispatch({ type: "update_step", step: "Identifying speakers..." });
+				const diarization = await diarizationService.diarize({
+					audioData: samples,
+					numSpeakers:
+						speakerCount === "auto" ? undefined : Number(speakerCount),
+					onProgress: handleProgress,
+				});
+
+				dispatch({ type: "update_step", step: "Generating captions..." });
+				const label =
+					speakerLabel.trim() ||
+					(isCjkText({ text: result.text })
+						? CJK_SPEAKER_LABEL
+						: DEFAULT_SPEAKER_LABEL);
+				const speakers = buildSpeakerCaptionTracks({
+					segments: assignSpeakersToSegments({
+						segments: result.segments,
+						turns: diarization.turns,
+					}),
+					label,
+				});
+
+				if (insertSpeakerCaptionTracks({ editor, speakers }).length === 0) {
+					dispatch({ type: "fail", error: "No captions were generated" });
+					return;
+				}
+
+				dispatch({
+					type: "succeed",
+					warnings:
+						diarization.speakerCount <= 1
+							? ["Only one speaker was detected."]
+							: [],
+				});
+				return;
+			}
 
 			dispatch({ type: "update_step", step: "Generating captions..." });
 			const captionChunks = buildCaptionChunks({ segments: result.segments });
@@ -307,7 +434,81 @@ export function Captions() {
 								</SelectContent>
 							</Select>
 						</SectionField>
+						<SectionField label="Hardware">
+							<Select
+								value={selectedHardware}
+								onValueChange={(value) =>
+									setSelectedHardware(
+										TRANSCRIPTION_HARDWARE_PROFILES.find(
+											(profile) => profile.id === value,
+										)?.id ?? "auto",
+									)
+								}
+							>
+								<SelectTrigger>
+									<SelectValue placeholder="Select hardware" />
+								</SelectTrigger>
+								<SelectContent>
+									<SelectItem value="auto">Auto detect</SelectItem>
+									{TRANSCRIPTION_HARDWARE_PROFILES.map((profile) => (
+										<SelectItem key={profile.id} value={profile.id}>
+											{profile.name}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+						</SectionField>
+						<div className="flex items-center justify-between gap-2">
+							<label htmlFor="identify-speakers" className="text-sm">
+								Identify speakers
+							</label>
+							<Switch
+								id="identify-speakers"
+								checked={identifySpeakers}
+								onCheckedChange={setIdentifySpeakers}
+							/>
+						</div>
+						{identifySpeakers && (
+							<>
+								<SectionField label="Number of speakers">
+									<Select value={speakerCount} onValueChange={setSpeakerCount}>
+										<SelectTrigger>
+											<SelectValue placeholder="Auto detect" />
+										</SelectTrigger>
+										<SelectContent>
+											<SelectItem value="auto">Auto detect</SelectItem>
+											{SPEAKER_COUNT_OPTIONS.map((count) => (
+												<SelectItem key={count} value={count}>
+													{count}
+												</SelectItem>
+											))}
+										</SelectContent>
+									</Select>
+								</SectionField>
+								<SectionField label="Speaker label">
+									<Input
+										value={speakerLabel}
+										placeholder={`${CJK_SPEAKER_LABEL} / ${DEFAULT_SPEAKER_LABEL}`}
+										onChange={(event) => setSpeakerLabel(event.target.value)}
+									/>
+								</SectionField>
+							</>
+						)}
 					</SectionFields>
+
+					{speakerTracks.length > 0 && (
+						<SectionField label="Speaker names">
+							<div className="flex flex-col gap-2">
+								{speakerTracks.map((speaker) => (
+									<SpeakerNameField
+										key={`${speaker.trackId}:${speaker.name}`}
+										trackId={speaker.trackId}
+										name={speaker.name}
+									/>
+								))}
+							</div>
+						</SectionField>
+					)}
 
 					<Button
 						type="button"
