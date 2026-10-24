@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
 	buildSpeakerCaptionTracks,
+	findSpeakerTracks,
 	formatSpeakerName,
+	renameSpeakerInContent,
 	speakerLetter,
 } from "@/transcription/speaker-captions";
 
@@ -51,5 +53,61 @@ describe("buildSpeakerCaptionTracks", () => {
 		expect(second.startTime).toBeGreaterThanOrEqual(
 			first.startTime + first.duration,
 		);
+	});
+});
+
+describe("renaming speakers", () => {
+	test("replaces the name and picks the separator for the new name", () => {
+		expect(
+			renameSpeakerInContent({
+				content: "演說者A：大家好",
+				oldName: "演說者A",
+				newName: "主持人",
+			}),
+		).toBe("主持人：大家好");
+		expect(
+			renameSpeakerInContent({
+				content: "演說者A：大家好",
+				oldName: "演說者A",
+				newName: "Host",
+			}),
+		).toBe("Host: 大家好");
+	});
+
+	test("leaves captions of another speaker or without a prefix alone", () => {
+		expect(
+			renameSpeakerInContent({
+				content: "演說者B：你好",
+				oldName: "演說者A",
+				newName: "主持人",
+			}),
+		).toBeNull();
+		expect(
+			renameSpeakerInContent({
+				content: "你好",
+				oldName: "演說者A",
+				newName: "X",
+			}),
+		).toBeNull();
+	});
+
+	test("finds tracks where most captions share a speaker prefix", () => {
+		const caption = (content: string) => ({ params: { content } });
+		const speakers = findSpeakerTracks({
+			tracks: [
+				{
+					id: "t1",
+					type: "text",
+					elements: [
+						caption("演說者A：一"),
+						caption("演說者A：二"),
+						caption("改過的"),
+					],
+				},
+				{ id: "t2", type: "text", elements: [caption("普通字幕")] },
+				{ id: "t3", type: "video", elements: [caption("Speaker B: hi")] },
+			],
+		});
+		expect(speakers).toEqual([{ trackId: "t1", name: "演說者A" }]);
 	});
 });

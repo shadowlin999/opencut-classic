@@ -117,6 +117,14 @@ describe("clusterSpeakerEmbeddings", () => {
 		expect(labels).toEqual([0, 0, 1, 1]);
 	});
 
+	test("keeps two lone voices apart when nothing larger exists", () => {
+		const labels = clusterSpeakerEmbeddings({
+			embeddings: [voiceA, voiceB],
+			similarityThreshold: 0.5,
+		});
+		expect(labels).toEqual([0, 1]);
+	});
+
 	test("folds tiny clusters into their nearest neighbour", () => {
 		const labels = clusterSpeakerEmbeddings({
 			embeddings: [voiceA, voiceA2, voiceB, voiceB2, [0.6, 0.6, 0.6]],

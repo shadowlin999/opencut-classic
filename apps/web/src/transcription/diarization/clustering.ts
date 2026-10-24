@@ -89,14 +89,10 @@ export function clusterSpeakerEmbeddings({
 		}
 	};
 
-	const closestPair = ({
-		rows,
-	}: {
-		rows: (row: number) => boolean;
-	}): [number, number] | null => {
+	const closestPair = (): [number, number] | null => {
 		let row = -1;
 		for (let i = 0; i < n; i++) {
-			if (!active[i] || bestIndex[i] < 0 || !rows(i)) continue;
+			if (!active[i] || bestIndex[i] < 0) continue;
 			if (row < 0 || bestSim[i] > bestSim[row]) row = i;
 		}
 		return row < 0 ? null : [row, bestIndex[row]];
@@ -105,7 +101,7 @@ export function clusterSpeakerEmbeddings({
 	let count = n;
 	const target = numSpeakers ? Math.max(1, Math.min(numSpeakers, n)) : 1;
 	while (count > target) {
-		const pair = closestPair({ rows: () => true });
+		const pair = closestPair();
 		if (!pair) break;
 		const [i, j] = pair;
 		if (!numSpeakers && bestSim[i] < similarityThreshold) break;
@@ -113,12 +109,26 @@ export function clusterSpeakerEmbeddings({
 		count--;
 	}
 
+	// Small clusters are only folded into an established one, never into each
+	// other: two lone voices from one short window are two speakers.
 	if (!numSpeakers) {
 		while (count > 1) {
-			const pair = closestPair({ rows: (row) => size[row] < minClusterSize });
-			if (!pair) break;
-			const [i, j] = pair;
-			merge({ keep: Math.min(i, j), drop: Math.max(i, j) });
+			let small = -1;
+			let large = -1;
+			let best = -Infinity;
+			for (let i = 0; i < n; i++) {
+				if (!active[i] || size[i] >= minClusterSize) continue;
+				for (let j = 0; j < n; j++) {
+					if (!active[j] || size[j] < minClusterSize) continue;
+					if (sim[i * n + j] > best) {
+						best = sim[i * n + j];
+						small = i;
+						large = j;
+					}
+				}
+			}
+			if (small < 0) break;
+			merge({ keep: Math.min(small, large), drop: Math.max(small, large) });
 			count--;
 		}
 	}

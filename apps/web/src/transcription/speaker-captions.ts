@@ -105,3 +105,77 @@ export function buildSpeakerCaptionTracks({
 
 	return [...tracks.values()].sort((a, b) => a.speaker - b.speaker);
 }
+
+const SPEAKER_PREFIX_PATTERN = /^([^\n：:]{1,40}?)(：|: )/;
+
+/** Reads the "演說者A：" / "Speaker A: " prefix off a caption, if any. */
+export function readSpeakerPrefix({
+	content,
+}: {
+	content: string;
+}): { name: string; prefix: string } | null {
+	const match = SPEAKER_PREFIX_PATTERN.exec(content);
+	if (!match) return null;
+	return { name: match[1], prefix: match[0] };
+}
+
+/**
+ * Swaps the speaker name at the start of a caption. Returns null when the
+ * caption does not start with `oldName`, so captions edited by hand are left
+ * alone.
+ */
+export function renameSpeakerInContent({
+	content,
+	oldName,
+	newName,
+}: {
+	content: string;
+	oldName: string;
+	newName: string;
+}): string | null {
+	const current = readSpeakerPrefix({ content });
+	if (!current || current.name !== oldName) return null;
+	const name = newName.trim();
+	if (!name) return null;
+	return `${name}${speakerSeparator({ name })}${content.slice(current.prefix.length)}`;
+}
+
+export interface SpeakerTrackInfo {
+	trackId: string;
+	name: string;
+}
+
+/**
+ * Finds speaker caption tracks on the timeline: text tracks where most
+ * captions start with the same speaker prefix. Reading this from the
+ * timeline keeps renaming working after a reload or a manual edit.
+ */
+export function findSpeakerTracks({
+	tracks,
+}: {
+	tracks: {
+		id: string;
+		type: string;
+		elements: { params: Record<string, unknown> }[];
+	}[];
+}): SpeakerTrackInfo[] {
+	const result: SpeakerTrackInfo[] = [];
+	for (const track of tracks) {
+		if (track.type !== "text" || track.elements.length === 0) continue;
+		const counts = new Map<string, number>();
+		for (const element of track.elements) {
+			const content = element.params.content;
+			if (typeof content !== "string") continue;
+			const prefix = readSpeakerPrefix({ content });
+			if (prefix) counts.set(prefix.name, (counts.get(prefix.name) ?? 0) + 1);
+		}
+		let best: [string, number] | null = null;
+		for (const entry of counts) {
+			if (!best || entry[1] > best[1]) best = entry;
+		}
+		if (best && best[1] * 2 > track.elements.length) {
+			result.push({ trackId: track.id, name: best[0] });
+		}
+	}
+	return result;
+}

@@ -9,7 +9,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
-import { useReducer, useRef, useState } from "react";
+import { useMemo, useReducer, useRef, useState } from "react";
 import { extractTimelineAudio } from "@/media/mediabunny";
 import { useEditor } from "@/editor/use-editor";
 import { TRANSCRIPTION_DIAGNOSTICS_SCOPE } from "@/transcription/diagnostics";
@@ -36,7 +36,9 @@ import {
 	CJK_SPEAKER_LABEL,
 	DEFAULT_SPEAKER_LABEL,
 	buildSpeakerCaptionTracks,
+	findSpeakerTracks,
 } from "@/transcription/speaker-captions";
+import { renameSpeakerOnTrack } from "@/subtitles/rename-speaker";
 import { decodeAudioToFloat32 } from "@/media/audio";
 import { buildCaptionChunks } from "@/transcription/caption";
 import {
@@ -111,6 +113,43 @@ function processingReducer(
 }
 /* eslint-enable opencut/prefer-object-params */
 
+function SpeakerNameField({
+	trackId,
+	name,
+}: {
+	trackId: string;
+	name: string;
+}) {
+	const editor = useEditor();
+	// Remounted (by key) when the name changes, so the draft starts fresh.
+	const [draft, setDraft] = useState(name);
+
+	const commit = () => {
+		const next = draft.trim();
+		if (!next || next === name) {
+			setDraft(name);
+			return;
+		}
+		renameSpeakerOnTrack({ editor, trackId, oldName: name, newName: next });
+	};
+
+	return (
+		<Input
+			value={draft}
+			aria-label={`Rename ${name}`}
+			onChange={(event) => setDraft(event.target.value)}
+			onBlur={commit}
+			onKeyDown={(event) => {
+				if (event.key === "Enter") event.currentTarget.blur();
+				if (event.key === "Escape") {
+					setDraft(name);
+					event.currentTarget.blur();
+				}
+			}}
+		/>
+	);
+}
+
 export function Captions() {
 	const [selectedLanguage, setSelectedLanguage] =
 		useState<TranscriptionLanguage>("auto");
@@ -125,6 +164,15 @@ export function Captions() {
 	const editor = useEditor();
 
 	const isProcessing = processing.status === "processing";
+
+	const activeScene = useEditor((e) => e.scenes.getActiveSceneOrNull());
+	const speakerTracks = useMemo(
+		() =>
+			activeScene
+				? findSpeakerTracks({ tracks: activeScene.tracks.overlay })
+				: [],
+		[activeScene],
+	);
 
 	const activeDiagnostics = useEditor((e) =>
 		e.diagnostics.getActive({ scope: TRANSCRIPTION_DIAGNOSTICS_SCOPE }),
@@ -447,6 +495,20 @@ export function Captions() {
 							</>
 						)}
 					</SectionFields>
+
+					{speakerTracks.length > 0 && (
+						<SectionField label="Speaker names">
+							<div className="flex flex-col gap-2">
+								{speakerTracks.map((speaker) => (
+									<SpeakerNameField
+										key={`${speaker.trackId}:${speaker.name}`}
+										trackId={speaker.trackId}
+										name={speaker.name}
+									/>
+								))}
+							</div>
+						</SectionField>
+					)}
 
 					<Button
 						type="button"
